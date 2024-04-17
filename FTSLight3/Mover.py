@@ -95,7 +95,7 @@ class FileMoverTask(Task, Logged):
         
         try:    
             metadata = json.loads(json_text)
-            if "file_size" not in metadata or "checksum" not in metadata:
+            if ("file_size" not in metadata and "size" not in metadata) or ("checksum" not in metadata and "checksums" not in metadata):
                 return self.failed("metadata does not include size or checksum")
         except: 
             self.log_record("metadata parsing error: %s" % (traceback.format_exc(),))
