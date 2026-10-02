@@ -1,0 +1,234 @@
+.TH REPLICA_FIX 1 "2026-10-02" "DUNE Rucio ops" "User Commands"
+.SH NAME
+replica_fix.sh \- clean up stale Rucio replica records on the DUNE tape-backed RSE
+.SH SYNOPSIS
+.B replica_fix.sh
+.RB [ \-\-apply ]
+.IR scope : name
+.br
+.B replica_fix.sh
+.RB [ \-\-apply ]
+.B \-\-list
+.IR file | \-
+.br
+.B replica_fix.sh
+.RB [ \-\-apply ]
+.B \-\-dataset
+.IR scope : name
+.SH DESCRIPTION
+.B replica_fix.sh
+repairs replica rows in the
+.B replicas
+table of the production DUNE Rucio database
+.RB ( dune_rucio_prod
+on
+.BR ifdb11.fnal.gov:5455 )
+so that the Rucio reaper can remove them.
+It acts only on replicas on the FNAL_DCACHE RSE
+.RI ( rse_id
+.BR a9780baa\-e23e\-4835\-9e2a\-84d3b19261ae ).
+.PP
+It is meant for files that were deleted from tape long ago but whose
+replica records remain.
+Such records often have a NULL
+.BR path ,
+which prevents the reaper from handling them.
+.PP
+For each target replica, two updates are applied:
+.IP 1. 4
+If
+.B path
+is NULL and
+.B tombstone
+is set,
+.B path
+is set to the placeholder
+.BR /pnfs/dune/tape_backed/dunepro .
+.IP 2. 4
+If
+.B lock_cnt
+is 0 and
+.B tombstone
+is
+.BR "1970\-01\-01 00:00:00" ,
+.B state
+is set to
+.B A
+and
+.B tombstone
+and
+.B updated_at
+are set to the epoch.
+.PP
+The reaper then picks the replica up (state
+.BR B ),
+"deletes" it, and removes the record.
+.PP
+The placeholder path is deliberate.
+Rucio appends
+.B path
+to the RSE prefix, so the resulting PFN does not point at any real file.
+This is harmless because FNAL_DCACHE is configured with Rucio's
+.B mock
+delete protocol: the reaper never contacts storage, and the delete always
+succeeds.
+Do not replace the placeholder with a real file path.
+.PP
+All modes are set-based.
+The target DIDs are loaded into a temporary table, and each update runs
+once as a join against it.
+A single
+.BR psql (1)
+session and transaction handle any number of files.
+.SH OPTIONS
+.TP
+.B \-\-apply
+Make the changes.
+Both updates run in a single transaction with
+.BR ON_ERROR_STOP ,
+followed by a summary and
+.BR COMMIT .
+Without this option the script runs a dry run: it reports what would
+change and rolls back.
+.TP
+.IR scope : name
+Operate on a single file DID.
+.TP
+.BI \-\-list " file"
+Read file DIDs from
+.IR file ,
+one
+.IR scope : name
+per line.
+If
+.I file
+is
+.BR \- ,
+read from standard input.
+Leading and trailing whitespace is trimmed, blank lines and lines starting with
+.B #
+are ignored, and duplicates are merged.
+If any line lacks a colon, the run aborts before anything is changed.
+.TP
+.BI \-\-dataset " scope" : name
+Operate on every file directly attached to the given dataset, looked up in the
+.B contents
+table
+.RB ( child_type " = " 'F' ).
+Files inside containers must be targeted through their datasets.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.SH OUTPUT
+In both modes the script prints a summary row with these columns:
+.TP
+.B dids
+Number of distinct target DIDs.
+.TP
+.B replicas_on_rse
+Number of those that have a replica on FNAL_DCACHE.
+.TP
+.B need_path
+Replicas matched by update 1 (NULL path, tombstone set).
+.TP
+.B mark_available
+Replicas matched by update 2 (unlocked, epoch tombstone).
+.TP
+.B locked
+Replicas with
+.B lock_cnt
+> 0, which update 2 skips.
+.PP
+Up to 20 matching replica rows follow.
+With
+.BR \-\-apply ,
+an
+.BI "UPDATE " n
+line is printed for each statement before the summary, and the summary
+shows the state after the update.
+A successful run ends with
+.BR Committed. ;
+if it is missing, the transaction did not commit.
+.SH ENVIRONMENT
+.TP
+.B PGPASSWORD
+Database password for user
+.BR rucio .
+Used if it is set; otherwise
+.BR psql (1)
+reads
+.BR ~/.pgpass .
+.SH FILES
+.TP
+.B ~/.pgpass
+Password file, which must have mode 0600.
+Example line:
+.RS
+.EX
+ifdb11.fnal.gov:5455:dune_rucio_prod:rucio:<password>
+.EE
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Usage error, unreadable list file, or a
+.BR psql (1)
+internal error.
+.TP
+.B 2
+Could not connect to the database.
+.TP
+.B 3
+An SQL error, including malformed DIDs in a list.
+The transaction is rolled back and nothing is changed.
+.SH EXAMPLES
+Dry run for one file:
+.PP
+.RS
+.EX
+replica_fix.sh protodune\-sp:PDSPProd4a_..._20240101T000012Z.root
+.EE
+.RE
+.PP
+Fix every file in a list:
+.PP
+.RS
+.EX
+replica_fix.sh \-\-list dids.txt
+replica_fix.sh \-\-apply \-\-list dids.txt
+.EE
+.RE
+.PP
+Fix a whole dataset, checking the file count first:
+.PP
+.RS
+.EX
+rucio list\-files protodune\-sp:SOME_DATASET
+replica_fix.sh \-\-dataset protodune\-sp:SOME_DATASET
+replica_fix.sh \-\-apply \-\-dataset protodune\-sp:SOME_DATASET
+.EE
+.RE
+.PP
+Confirm that the reaper has removed a replica:
+.PP
+.RS
+.EX
+rucio list\-file\-replicas \-\-all\-states \fIscope\fP:\fIname\fP
+.EE
+.RE
+.SH CAVEATS
+This script writes directly to the production Rucio database, bypassing the
+Rucio API.
+Always run a dry run first.
+.PP
+With
+.BR \-\-apply ,
+one transaction holds row locks on every matched replica until it commits.
+For very large lists, consider splitting the input into chunks of a few
+thousand DIDs.
+.SH SEE ALSO
+.BR psql (1),
+.BR rucio (1)
